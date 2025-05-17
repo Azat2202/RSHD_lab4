@@ -178,6 +178,162 @@ rm -rf /var/lib/postgresql/16/main/*
 
 ```sh
 pg_basebackup -R -h 10.128.0.29 -U rep_user -D /var/lib/postgresql/16/main -P
+systemctl start postgresql
 ```
 
+- флаг -R означает создание файла *standby.signal*, который означает, что сервер - реплика
 
+#image("img/basebackup.png")
+
+
+== Подготовка
+
+=== Мастер
+
+```sh
+psql -c 'select client_addr, state from pg_stat_replication;'
+```
+
+#image("img/check_master.png")
+
+=== Слейв
+
+```sh
+psql -c 'select sender_host, status from pg_stat_wal_receiver;'
+```
+
+#image("img/check_slave.png")
+
+== Наполнение данными
+
+На мастере подключимся с помощью команды `psql`
+
+```sql
+start transaction;
+create table rshd_user(
+    id serial primary key,
+    name text not null,
+    lab int not null
+);
+insert into rshd_user (name, lab) values
+    ('Ульяна', 4),
+    ('Азат', 4)
+;
+commit;
+```
+
+На локальном компьютере с помощью команды `psql -h 62.84.113.222 -d postgres -U rshd`
+
+```sql
+start transaction;
+create table rshd_lab(
+    id serial primary key,
+    name text not null,
+    status boolean not null
+);
+insert into rshd_lab (name, status) values
+    ('Лаб1', true),
+    ('Лаб2', true),
+    ('Лаб3', true),
+    ('Лаб4', false)
+;
+commit;
+```
+
+На слейве проверим что данные добавились
+
+```sql
+select * from rshd_user;
+select * from rshd_lab;
+```
+
+#image("img/show_data_replica.png")
+
+Теперь проверим что слейв работает в режиме read_only
+
+```sql
+create table test (id int);
+```
+
+#image("img/create_data_replica.png")
+
+#pagebreak()
+
+= Сбой
+
+Исполним команду на мастере
+
+```sh
+mv  /var/lib/postgresql/16/main ~/main_save
+```
+
+Посмотрим логи:
+
+#image("img/fail_logs.png")
+
+Выполним failover с помощью команды
+
+```sh
+/usr/lib/postgresql/16/bin/pg_ctl promote -D /var/lib/postgresql/16/main
+```
+Команда переключает реплику в режим read_write
+
+#image("img/fail_promote_log.png")
+
+Добавим данные на слейве
+
+```sql
+insert into rshd_user (name, lab) values
+    ('Ульяна', 3),
+    ('Азат', 3)
+;
+```
+
+Теперь наш слейв сервер стал мастером
+
+#pagebreak()
+
+= Восстановление
+
+Чтобы восстановить данные на мастере нужно заново сделать pg_basebackup только теперь с слейва на мастер (и без флага -R)
+
+```sh
+pg_basebackup -h 10.128.0.12 -U rep_user -D /var/lib/postgresql/16/main -P
+```
+
+На слейве создадим *standby.signal* чтобы просигнализировать что он снова слейв
+
+```sh
+touch ~/16/main/standby.signal
+systemctl restart postgresql
+```
+
+На мастере запустим сервер
+
+```sh
+systemctl restart postgresql
+```
+
+Проверим успешное подключение слейва к мастеру
+
+#image("img/master_slave_after_restore.png")
+
+Добавим новые данные на мастере и покажем что они есть на слейве
+
+```sql
+update rshd_lab
+set status=false
+where name='Лаб4';
+```
+
+Проверим что данные синхронизировались
+
+#image("img/master_slave_data_after_restore.png")
+
+
+#pagebreak
+
+= Вывод
+
+В лабораторой работе мы познакомились с конфигурацией потоковой репликации в БД postgresql и научились переключать
+мастер
